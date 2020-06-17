@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <title>跑跑卡丁车</title>
+    <style>
+        body {
+            margin: 0;
+            text-align: center;
+        }
+
+        #info {
+            position: absolute;
+            top: 0;
+            width: 100%;
+            padding: 10px;
+        }
+
+        #speedometer {
+            position: absolute;
+            color: white;
+            background: #900;
+            bottom: 0;
+            padding: 5px;
+        }
+    </style>
+    <script src="js/three.js"></script>
+    <script src="js/ammo.js"></script>
+    <script src="js/OrbitControls.js"></script>
+    <script src="js/stats.min.js"></script>
+    <script src="js/Detector.js"></script>
+    <script src="js/OBJLoader.js"></script>
+    <script src="js/MTLLoader.js"></script>
+</head>
+
+<body>
+    <div id="container"><br /><br /><br /><br /><br />Loading...</div>
+    <div id="info">跑跑卡丁车<br>使用WSAD键控制</div>
+    <div id="speedometer">0.0 km/h</div>
+</body>
+<script>
+    // 检测浏览器是否支持webgl
+    if (!Detector.webgl) {
+        Detector.addGetWebGLMessage();
+        document.getElementById('container').innerHTML = '';
+    }
+
+    // 绘图相关变量
+    var container, stats;
+    var camera, controls, scene, renderer;
+    var textureLoader;
+    var clock = new THREE.Clock();
+    var terrainMesh;
+
+    // 物理引擎相关变量
+    var gravityConstant = -9.8;
+    var collisionConfiguration;
+    var dispatcher;
+    var broadphase;
+    var solver;
+    var physicsWorld;
+    var rigidBodies = [];
+    var margin = 0.05;
+    var transformAux1 = new Ammo.btTransform();
+    // var pos = new THREE.Vector3();
+    // var quat = new THREE.Quaternion(); //Quaternions are used in three.js to represent rotations.
+
+    var time = 0;
+
+    //
+    var groundlong = 60;
+    var groundwidth = 40;
+
+    // 鼠标输入相关
+    var mouseCoords = new THREE.Vector2();
+    var raycaster = new THREE.Raycaster();
+    var ballMaterial = new THREE.MeshPhongMaterial({
+        color: 0x202020
+    });
+
+    // bullet内置宏
+    var DISABLE_DEACTIVATION = 4;
+    var TRANSFORM_AUX = new Ammo.btTransform();
+    var ZERO_QUATERNION = new THREE.Quaternion(0, 0, 0, 1);
+
+    // 车辆系统辅助
+    var speedometer;
+    var syncList = []; // 车辆系统用syncList保存事件列表,不再使用rigidBodies变量.存放用于绘制和同步物理场景的方法
+
+    // - 主程序
+    init();
+    animate();
+
+    function init() {
+        initGraphics();
+        initPhysics();
+        initInput();
+        createObjects();
+    }
+
+    function initGraphics() {
+        // three.js基本场景配置
+        container = document.getElementById('container');
+        container.innerHTML = "";
+
+        var camera = new THREE.PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 0;
+        camera.position.x = 0;
+        camera.speed = {
+            z: 0,
+            x: 0
+        };
+
+        controls = new THREE.OrbitControls(camera);
+        controls.target.y = 2;
+
+        // renderer = new THREE.WebGLRenderer();
+        renderer = new THREE.WebGLRenderer({
+            antialias: true
+        });
+        renderer.setClearColor(0x0077ec, 1);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+
+        textureLoader = new THREE.TextureLoader();
+
+        // 场景
+        scene = new THREE.Scene();
+
+        // 环境光
+        var ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+
+        // 线性光
+        var light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(-10, 10, 5);
+        light.castShadow = true;
+        var d = 10;
+        light.shadow.camera.left = -d;
+        light.shadow.camera.right = d;
+        light.shadow.camera.top = d;
+        light.shadow.camera.bottom = -d;
+
+        light.shadow.camera.near = 2;
+        light.shadow.camera.far = 2;
+
+        light.shadow.mapSize.x = 1024;
+        light.shadow.mapSize.y = 1024;
+
+        scene.add(light);
+
+        container.appendChild(renderer.domElement);
+
+        // 显示帧数
+        stats = new Stats();
+        stats.domElement.style.position = 'absolute';
+        stats.domElement.style.top = 'absolute';
+        container.appendChild(stats.domElement);
+
+        // 添加窗口大小变化监听
+        window.addEventListener('resize', onWindowResize, false);
+
+        // 速度表初始化
+        speedometer = document.getElementById('speedometer');
+    }
+
+    //对鼠标拖动的摄像头响应
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+    }
+
+    function initPhysics() {
+        // bullet基本场景配置
+        collisionConfiguration = new Ammo.btDefaultCollisionConfiguration();
+        dispatcher = new Ammo.btCollisionDispatcher(collisionConfiguration);
+        broadphase = new Ammo.btDbvtBroadphase();
+        solver = new Ammo.btSequentialImpulseConstraintSolver();
+        physicsWorld = new Ammo.btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfiguration);
+        physicsWorld.setGravity(new Ammo.btVector3(0, gravityConstant, 0));
+    }
+
+    function initInput() {
+        // window.addEventListener('keydown', function (e) {
+        //     // if (keysActions[e.code]) {
+        //     //     actions[keysActions[e.code]] = true;
+        //     //     e.preventDefault();
+        //     //     e.stopPropagation();
+        //     //     return false;
+        //     // }
+        //     switch (e.keyCode) {
+        //         case 87: // w
+        //             car.run = true;
+        //             break;
+        //         case 65: // a
+        //             car.rSpeed = 0.02;
+        //             break;
+        //         case 68: // d
+        //             car.rSpeed = -0.02;
+        //             break;
+        //         case 32: // space
+        //             car.brake();
+        //             break;
+        //     }
+        // });
+        // window.addEventListener('keyup', function (e) {
+        //     // if (keysActions[e.code]) {
+        //     //     actions[keysActions[e.code]] = false;
+        //     //     e.preventDefault();
+        //     //     e.stopPropagation();
+        //     //     return false;
+        //     // }
+        //     switch (e.keyCode) {
+        //         case 87: // w
+        //             car.run = false;
+        //             break;
+        //         case 65: // a
+        //             car.rSpeed = 0;
+        //             break;
+        //         case 68: // d
+        //             car.rSpeed = 0;
+        //             break;
+        //         case 32: // space
+        //             car.cancelBrake();
+        //             break;
+        //     }
+        // });
+    }
+
+    function createObjects() {
+        //创建赛道
+        // var ground = createParalellepipedWithPhysics(groundlong, 1, groundwidth, 0, pos, quat, new THREE
+        //     .MeshPhongMaterial({
+        //         color: 0x666666
+        //     }));
+        // ground.receiveShadow = true;
+        // scene.add(ground);
+        // var pos = new THREE.Vector3();
+        // var quat = new THREE.Quaternion();
+        // // 创建地面
+        // pos.set(0, -0.5, 0);
+        // quat.set(0, 0, 0, 1);
+        // var ground = createParallellepiped(groundlong, 1, groundwidth, 0, pos, quat, new THREE.MeshPhongMaterial({
+        //     color: 0xffffff
+        // }));
+        // ground.castShadow = true; // 开启投影
+        // ground.receiveShadow = true; // 接受阴影(可以在表面上显示阴影)
+        // textureLoader.load("./textures/grid.png", function (texture) {
+        //     texture.wrapS = THREE.RepeatWrapping;
+        //     texture.wrapT = THREE.RepeatWrapping;
+        //     texture.repeat.set(40, 40);
+        //     ground.material.map = texture;
+        //     ground.material.needsUpdate = texture;
+        // });
+
+        createBox(new THREE.Vector3(0, -0.5, 0), ZERO_QUATERNION, 75, 1, 75, 0, 2);
+
+    }
+
+    function createBox(pos, quat, w, l, h, mass, friction) {
+        var material = new THREE.MeshPhongMaterial({color: 0x666666});
+        var shape = new THREE.BoxGeometry(w, l, h, 1, 1, 1);
+        var geometry = new Ammo.btBoxShape(new Ammo.btVector3(w * 0.5, l * 0.5, h * 0.5));
+        if(!mass) mass = 0;
+        if(!friction) friction = 1;
+        var mesh = new THREE.Mesh(shape, material);
+        mesh.position.copy(pos);
+        mesh.quaternion.copy(quat);
+        scene.add( mesh );
+        var transform = new Ammo.btTransform();
+        transform.setIdentity();
+        transform.setOrigin(new Ammo.btVector3(pos.x, pos.y, pos.z));
+        transform.setRotation(new Ammo.btQuaternion(quat.x, quat.y, quat.z, quat.w));
+        var motionState = new Ammo.btDefaultMotionState(transform);
+        var localInertia = new Ammo.btVector3(0, 0, 0);
+        geometry.calculateLocalInertia(mass, localInertia);
+        var rbInfo = new Ammo.btRigidBodyConstructionInfo(mass, motionState, geometry, localInertia);
+        var body = new Ammo.btRigidBody(rbInfo);
+        body.setFriction(friction);//添加摩擦力的功能
+        
+        physicsWorld.addRigidBody(body);
+        if (mass > 0) {
+            body.setActivationState(DISABLE_DEACTIVATION);
+            //同步物理场景和绘图空间
+            function sync(dt) {
+                var ms = body.getMotionState();
+                if (ms) {
+                    ms.getWorldTransform(TRANSFORM_AUX);
+                    var p = TRANSFORM_AUX.getOrigin();
+                    var q = TRANSFORM_AUX.getRotation();
+                    mesh.position.set(p.x(), p.y(), p.z());
+                    mesh.quaternion.set(q.x(), q.y(), q.z(), q.w());
+                }
+            }
+            syncList.push(sync);
+        }
+    }
+
+    // function roads(params) {
+    //     var mtlLoader = new THREE.MTLLoader();
+
+    // }
+    // function createParalellepipedWithPhysics(sx, sy, sz, mass, pos, quat, material) {
+
+    //     var object = new THREE.Mesh(new THREE.BoxBufferGeometry(sx, sy, sz, 1, 1, 1), material);
+    //     var shape = new Ammo.btBoxShape(new Ammo.btVector3(sx * 0.5, sy * 0.5, sz * 0.5));
+    //     shape.setMargin(margin);
+    //     createRigidBody(object, shape, mass, pos, quat);
+    //     return object;
+
+    // }
+
+    //建立物理刚性模型以及将物理模型和显示模型相关联
+    function createRigidBody(object, physicsShape, mass, pos, quat) {
+        //检验确认位置和方向信息
+        if (pos) {
+            object.position.copy(pos);
+        } else {
+            pos = object.position;
+        }
+        if (quat) {
+            object.quaternion.copy(quat);
+        } else {
+            quat = object.quaternion;
+        }
+
+        //将位置和方向信息加入transform变量，生成物体在物理世界的位置方向的运动状态
+        var transform = new Ammo.btTransform();
+        transform.setIdentity();
+        transform.setOrigin(new Ammo.btVector3(pos.x, pos.y, pos.z));
+        transform.setRotation(new Ammo.btQuaternion(quat.x, quat.y, quat.z, quat.w));
+        var motionState = new Ammo.btDefaultMotionState(transform);
+
+        //对物体的形状和质量进行关联
+        var localInertia = new Ammo.btVector3(0, 0, 0);
+        physicsShape.calculateLocalInertia(mass, localInertia);
+
+        //对转换过的运动状态参数和物体本身的参数进行结合，并生成变量body
+        var rbInfo = new Ammo.btRigidBodyConstructionInfo(mass, motionState, physicsShape, localInertia);
+        var body = new Ammo.btRigidBody(rbInfo);
+
+        body.setFriction(0.0);
+
+        object.userData.physicsBody = body;
+        object.userData.collided = false;
+
+        //在显示世界总加载显示模型object
+        scene.add(object);
+
+        //设置物理模型的状态
+        if (mass > 0) {
+            rigidBodies.push(object);
+
+            // Disable deactivation
+            body.setActivationState(4);
+        }
+
+        //在物理空间加载物理模型
+        physicsWorld.addRigidBody(body);
+
+        return body;
+
+    }
+
+
+    function animate() {
+        requestAnimationFrame(animate);
+        render();
+        stats.update();
+    }
+
+    function render() {
+        var deltaTime = clock.getDelta();
+        updatePhysics(deltaTime);
+        controls.update(deltaTime);
+        renderer.render(scene, camera);
+        time += deltaTime;
+    }
+
+    function updatePhysics(deltaTime) {
+        physicsWorld.stepSimulation(deltaTime);
+        // 更新物体位置
+        for (var i = 0, iL = rigidBodies.length; i < iL; i++) {
+            var objThree = rigidBodies[i];
+            var objPhys = objThree.userData.physicsBody;
+            var ms = objPhys.getMotionState();
+            if (ms) {
+                ms.getWorldTransform(transformAux1);
+                var p = transformAux1.getOrigin();
+                var q = transformAux1.getRotation();
+                objThree.position.set(p.x(), p.y(), p.z());
+                objThree.quaternion.set(q.x(), q.y(), q.z(), q.w());
+            }
+        }
+    }
+</script>
+
+</html>
